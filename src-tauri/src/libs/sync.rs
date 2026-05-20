@@ -1,8 +1,14 @@
+use aes_gcm::{
+    aead::{Aead, KeyInit},
+    Aes256Gcm, Key, Nonce,
+};
 use anyhow::{anyhow, Context, Result};
+use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use chrono::Utc;
 use keyring::Entry;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::{
     collections::{HashMap, HashSet, VecDeque},
     sync::atomic::{AtomicBool, Ordering},
@@ -37,6 +43,24 @@ struct AuthCallbackQueue {
 static AUTH_CALLBACK_QUEUE: OnceLock<AuthCallbackQueue> = OnceLock::new();
 static SYNC_CANCELLED: AtomicBool = AtomicBool::new(false);
 static SYNC_CANCEL_NOTIFY: OnceLock<Notify> = OnceLock::new();
+static PENDING_AUTH_CLIENT_ID: OnceLock<StdMutex<Option<String>>> = OnceLock::new();
+
+fn pending_client_id_store() -> &'static StdMutex<Option<String>> {
+    PENDING_AUTH_CLIENT_ID.get_or_init(|| StdMutex::new(None))
+}
+
+fn set_pending_client_id(client_id: Option<String>) {
+    if let Ok(mut guard) = pending_client_id_store().lock() {
+        *guard = client_id;
+    }
+}
+
+fn take_pending_client_id() -> Option<String> {
+    pending_client_id_store()
+        .lock()
+        .ok()
+        .and_then(|guard| guard.clone())
+}
 
 #[derive(Debug, Clone, Serialize)]
 struct SyncProgressPayload {
@@ -150,8 +174,10 @@ impl SyncManager {
         &mut self,
         app: &tauri::AppHandle,
         server_address: &str,
+        client_id: Option<String>,
     ) -> Result<SyncState> {
         clear_sync_cancel();
+        set_pending_client_id(client_id);
         let pending = SyncState {
             connected: false,
             status: "running".to_string(),
@@ -716,6 +742,31 @@ async fn wait_for_auth_callback() -> Result<CallbackAuthData> {
     }
 }
 
+fn derive_aes_key(client_id: &str) -> [u8; 32] {
+    let mut hasher = Sha256::new();
+    hasher.update(client_id.as_bytes());
+    hasher.finalize().into()
+}
+
+fn decrypt_callback_data(encrypted_b64: &str, client_id: &str) -> Result<CallbackAuthData> {
+    let bytes = URL_SAFE_NO_PAD
+        .decode(encrypted_b64)
+        .context("base64 invalido no callback")?;
+
+    if bytes.len() < 12 + 16 {
+        return Err(anyhow!("payload de callback muito curto"));
+    }
+
+    let (iv_bytes, ciphertext) = bytes.split_at(12);
+    let key_bytes = derive_aes_key(client_id);
+    let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(&key_bytes));
+    let plaintext = cipher
+        .decrypt(Nonce::from_slice(iv_bytes), ciphertext)
+        .map_err(|_| anyhow!("falha ao descriptografar callback de auth"))?;
+
+    serde_json::from_slice(&plaintext).context("JSON invalido no callback decriptado")
+}
+
 fn parse_auth_callback_from_deeplink(raw_url: &str) -> Result<Option<CallbackAuthData>> {
     let cleaned = raw_url.trim().trim_matches('"');
     let Some(path_query) = cleaned.strip_prefix("openptl://") else {
@@ -733,6 +784,14 @@ fn parse_auth_callback_from_deeplink(raw_url: &str) -> Result<Option<CallbackAut
         return Err(anyhow!("Login falhou: {}", error));
     }
 
+    // Encrypted path: single `data` param
+    if let Some(encrypted) = params.get("data").filter(|v| !v.is_empty()) {
+        let client_id = take_pending_client_id()
+            .ok_or_else(|| anyhow!("client_id nao disponivel para descriptografar callback"))?;
+        return decrypt_callback_data(encrypted, &client_id).map(Some);
+    }
+
+    // Legacy plain-text path (servers without encryption support)
     let refresh_token = params
         .get("refresh_token")
         .filter(|value| !value.is_empty())
@@ -817,21 +876,31 @@ async fn wait_for_callback(listener: &TcpListener) -> Result<CallbackAuthData> {
         return Err(anyhow!("Login falhou: {}", error));
     }
 
-    let refresh_token = params
-        .get("refresh_token")
-        .filter(|v| !v.is_empty())
-        .cloned()
-        .ok_or_else(|| anyhow!("refresh_token nao recebido no callback"))?;
+    // Encrypted path: single `data` param
+    let auth_data = if let Some(encrypted) = params.get("data").filter(|v| !v.is_empty()) {
+        let client_id = take_pending_client_id()
+            .ok_or_else(|| anyhow!("client_id nao disponivel para descriptografar callback"))?;
+        decrypt_callback_data(encrypted, &client_id)?
+    } else {
+        // Legacy plain-text path
+        let refresh_token = params
+            .get("refresh_token")
+            .filter(|v| !v.is_empty())
+            .cloned()
+            .ok_or_else(|| anyhow!("refresh_token nao recebido no callback"))?;
+        CallbackAuthData {
+            refresh_token,
+            email: params.get("email").cloned().filter(|v| !v.is_empty()),
+            name: params.get("name").cloned().filter(|v| !v.is_empty()),
+            picture_url: params
+                .get("picture")
+                .or_else(|| params.get("picture_url"))
+                .cloned()
+                .filter(|v| !v.is_empty()),
+        }
+    };
 
-    let email = params.get("email").cloned().filter(|v| !v.is_empty());
-    let name = params.get("name").cloned().filter(|v| !v.is_empty());
-    let picture_url = params
-        .get("picture")
-        .or_else(|| params.get("picture_url"))
-        .cloned()
-        .filter(|value| !value.is_empty());
-
-    let display_name = name.as_deref().unwrap_or("usuario");
+    let display_name = auth_data.name.as_deref().unwrap_or("usuario");
     let html = format!(
         "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nConnection: close\r\n\r\n\
         <html><body style=\"font-family:system-ui;text-align:center;padding:60px\">\
@@ -843,12 +912,7 @@ async fn wait_for_callback(listener: &TcpListener) -> Result<CallbackAuthData> {
     stream.write_all(html.as_bytes()).await.ok();
     stream.flush().await.ok();
 
-    Ok(CallbackAuthData {
-        refresh_token,
-        email,
-        name,
-        picture_url,
-    })
+    Ok(auth_data)
 }
 
 async fn access_token_from_refresh_with_fallback(

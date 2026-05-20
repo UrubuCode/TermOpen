@@ -2219,17 +2219,25 @@ async fn sync_google_login(
     state: State<'_, AppState>,
     server_address: Option<String>,
 ) -> Result<SyncState, String> {
-    let server_address = if let Some(address) = server_address
+    let (server_address, client_id) = if let Some(address) = server_address
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
     {
-        address
+        let vault = state.vault.lock().await;
+        let servers = vault.auth_servers_list().map_err(app_error)?;
+        let client_id = servers
+            .iter()
+            .find(|s| s.address == address)
+            .and_then(|s| s.client_id.clone());
+        (address, client_id)
     } else {
         let vault = state.vault.lock().await;
-        vault.selected_auth_server().map_err(app_error)?.address
+        let server = vault.selected_auth_server().map_err(app_error)?;
+        let client_id = server.client_id.clone();
+        (server.address, client_id)
     };
     let mut sync = state.sync.lock().await;
-    sync.google_login(&app, &server_address)
+    sync.google_login(&app, &server_address, client_id)
         .await
         .map_err(app_error)
 }

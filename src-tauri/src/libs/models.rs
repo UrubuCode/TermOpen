@@ -335,6 +335,7 @@ pub struct AuthServer {
     pub author: Option<String>,
     #[serde(default)]
     pub official: bool,
+    pub client_id: Option<String>,
 }
 
 impl AuthServer {
@@ -345,6 +346,7 @@ impl AuthServer {
             address: "https://openptl-auth.example.workers.dev".to_string(),
             author: Some("https://github.com/urubucode".to_string()),
             official: true,
+            client_id: None,
         }
     }
 }

@@ -249,6 +249,38 @@ const BASE_STYLE = `
     </style>
   `;
 
+// ─── Crypto ─────────────────────────────────────────────────────────
+
+async function deriveAesKey(clientId) {
+  const keyMaterial = await crypto.subtle.importKey(
+    'raw',
+    new TextEncoder().encode(clientId),
+    { name: 'PBKDF2' },
+    false,
+    ['deriveBits'],
+  );
+  const keyBits = await crypto.subtle.deriveBits(
+    { name: 'PBKDF2', salt: new TextEncoder().encode('openptl-auth-v1'), iterations: 1, hash: 'SHA-256' },
+    keyMaterial,
+    256,
+  );
+  return crypto.subtle.importKey('raw', keyBits, { name: 'AES-GCM' }, false, ['encrypt']);
+}
+
+async function encryptCallbackData(payload, clientId) {
+  const key = await deriveAesKey(clientId);
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const plaintext = new TextEncoder().encode(JSON.stringify(payload));
+  const ciphertext = await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, key, plaintext);
+  const combined = new Uint8Array(12 + ciphertext.byteLength);
+  combined.set(iv, 0);
+  combined.set(new Uint8Array(ciphertext), 12);
+  return btoa(String.fromCharCode(...combined))
+    .replace(/\+/g, '-')
+    .replace(/\//g, '_')
+    .replace(/=+$/, '');
+}
+
 // ─── Helpers ────────────────────────────────────────────────────────
 
 function corsHeaders(origin, env) {
@@ -395,13 +427,20 @@ async function handleGoogleCallback(request, env) {
   const pipeIndex     = rawState.indexOf('|');
   const localCallback = pipeIndex !== -1 ? rawState.slice(pipeIndex + 1) : '';
 
+  const callbackPayload = {
+    refresh_token: tokens.refresh_token || '',
+    email:         user.email  || '',
+    name:          user.name   || '',
+    picture_url:   user.picture || '',
+  };
+
   // Só redireciona para localhost — evita open redirect
   if (localCallback.startsWith('http://localhost')) {
-    const redirectParams = new URLSearchParams({
-      refresh_token: tokens.refresh_token || '',
-      email:         user.email || '',
-      name:          user.name  || '',
-    });
+    if (GOOGLE_CLIENT_ID) {
+      const encrypted = await encryptCallbackData(callbackPayload, GOOGLE_CLIENT_ID);
+      return Response.redirect(`${localCallback}?data=${encodeURIComponent(encrypted)}`, 302);
+    }
+    const redirectParams = new URLSearchParams(callbackPayload);
     return Response.redirect(`${localCallback}?${redirectParams}`, 302);
   }
 
@@ -416,6 +455,7 @@ async function handleGoogleCallback(request, env) {
       name:    user.name,
       picture: user.picture,
     },
+    clientId: GOOGLE_CLIENT_ID,
   }), {
     status: 200,
     headers: { 'Content-Type': 'text/html' },
@@ -475,6 +515,13 @@ function renderCallbackHTML({ tokens, user, error }) {
   }
 
   const payload    = safeJsonInScript({ type: 'auth-success', tokens, user });
+  const callbackPayloadJson = safeJsonInScript({
+    refresh_token: tokens.refresh_token || '',
+    email:         user.email           || '',
+    name:          user.name            || '',
+    picture_url:   user.picture         || '',
+  });
+  const safeClientId = clientId ? JSON.stringify(clientId) : 'null';
   const avatarHTML = user.picture
     ? `<img src="${user.picture}" alt="${user.name}" />`
     : userIcon;
@@ -516,17 +563,50 @@ function renderCallbackHTML({ tokens, user, error }) {
 
   <script>
     const data = ${payload};
+    const callbackPayload = ${callbackPayloadJson};
+    const clientId = ${safeClientId};
+
     if (window.opener) {
       window.opener.postMessage(data, '*');
     }
-    try {
+
+    async function buildDeeplinkUrl() {
+      if (clientId) {
+        try {
+          const enc = new TextEncoder();
+          const keyMaterial = await crypto.subtle.importKey(
+            'raw', enc.encode(clientId), { name: 'PBKDF2' }, false, ['deriveBits']
+          );
+          const keyBits = await crypto.subtle.deriveBits(
+            { name: 'PBKDF2', salt: enc.encode('openptl-auth-v1'), iterations: 1, hash: 'SHA-256' },
+            keyMaterial, 256
+          );
+          const key = await crypto.subtle.importKey('raw', keyBits, { name: 'AES-GCM' }, false, ['encrypt']);
+          const iv = crypto.getRandomValues(new Uint8Array(12));
+          const ciphertext = await crypto.subtle.encrypt(
+            { name: 'AES-GCM', iv },
+            key,
+            enc.encode(JSON.stringify(callbackPayload))
+          );
+          const combined = new Uint8Array(12 + ciphertext.byteLength);
+          combined.set(iv, 0);
+          combined.set(new Uint8Array(ciphertext), 12);
+          const b64url = btoa(String.fromCharCode(...combined))
+            .replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+          return 'openptl://auth?data=' + encodeURIComponent(b64url);
+        } catch (_) { /* fallthrough to plain */ }
+      }
       const params = new URLSearchParams({
-        refresh_token: data.tokens.refresh_token || '',
-        email:         data.user.email || '',
-        name:          data.user.name  || '',
+        refresh_token: callbackPayload.refresh_token,
+        email:         callbackPayload.email,
+        name:          callbackPayload.name,
       });
-      window.location.href = 'openptl://auth?' + params.toString();
-    } catch (e) { /* desktop não disponível */ }
+      return 'openptl://auth?' + params.toString();
+    }
+
+    buildDeeplinkUrl().then(url => {
+      try { window.location.href = url; } catch (_) {}
+    });
     setTimeout(() => window.close(), 3000);
   <\/script>
 </body>
