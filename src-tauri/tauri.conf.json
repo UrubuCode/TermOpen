@@ -32,7 +32,7 @@
   "plugins": {
     "deep-link": {
       "desktop": {
-        "schemes": ["openptl", "ssh", "sftp"]
+        "schemes": ["openptl", "ssh", "sftp", "smb"]
       }
     }
   },

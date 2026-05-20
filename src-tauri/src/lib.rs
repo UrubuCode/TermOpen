@@ -2778,7 +2778,7 @@ fn is_supported_deep_link(payload: &str) -> bool {
     };
     matches!(
         scheme.to_ascii_lowercase().as_str(),
-        OPENPTL_SCHEME | "ssh" | "sftp" | "rdp"
+        OPENPTL_SCHEME | "ssh" | "sftp" | "smb" | "rdp"
     )
 }
 

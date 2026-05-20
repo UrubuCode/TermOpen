@@ -2,17 +2,9 @@
   {
     "id": "default",
     "label": "OpenPtl Official (Cloudflare Worker)",
-    "address": "https://openptl-auth.example.workers.dev",
+    "address": "https://optl-auth.urubucode.top",
     "author": "https://github.com/urubucode",
     "official": true,
-    "client_id": "YOUR_GOOGLE_CLIENT_ID.apps.googleusercontent.com"
-  },
-  {
-    "id": "dead-server",
-    "label": "Servidor Inativo (Exemplo)",
-    "address": "https://openptl-dead.example.workers.dev",
-    "author": "https://github.com/nobody",
-    "official": false,
-    "client_id": null
+    "client_id": "855459897430-auqn9pc1kfl3p4barthsp3s85l74vh89.apps.googleusercontent.com"
   }
 ]

@@ -70,6 +70,52 @@ const protocolMeta: Record<
   },
 };
 
+interface ParsedHostUrl {
+  host: string;
+  port: number;
+  username: string;
+  remotePath: string;
+  protocol: ConnectionProtocol;
+}
+
+function tryParseHostUrl(raw: string): ParsedHostUrl | null {
+  const trimmed = raw.trim();
+  if (!trimmed.includes("://")) {
+    return null;
+  }
+
+  let url: URL;
+  try {
+    url = new URL(trimmed);
+  } catch {
+    return null;
+  }
+
+  const scheme = url.protocol.replace(":", "").toLowerCase() as ConnectionProtocol;
+  const validProtocols: ConnectionProtocol[] = ["ssh", "sftp", "ftp", "ftps", "smb", "rdp"];
+  if (!validProtocols.includes(scheme)) {
+    return null;
+  }
+
+  const host = url.hostname.trim();
+  if (!host) {
+    return null;
+  }
+
+  const defaultPort = protocolMeta[scheme]?.defaultPort ?? 22;
+  const port = url.port ? Number(url.port) : defaultPort;
+  if (!Number.isFinite(port) || port < 1 || port > 65535) {
+    return null;
+  }
+
+  const username = decodeURIComponent(url.username || "").trim();
+  const pathname = decodeURIComponent(url.pathname || "/").trim();
+  const hasRemotePath = scheme === "sftp" || scheme === "smb" || scheme === "ftp" || scheme === "ftps";
+  const remotePath = hasRemotePath ? (pathname || "/") : "/";
+
+  return { host, port, username, remotePath, protocol: scheme };
+}
+
 function hasFileProtocol(protocols: ConnectionProtocol[]): boolean {
   return protocols.some((item) => item === "sftp" || item === "ftp" || item === "ftps" || item === "smb");
 }
@@ -242,6 +288,27 @@ export function HostFormDrawer() {
   const selectedProtocol = useMemo(() => primaryProtocolFromList(watchedProtocols), [watchedProtocols]);
   const sshAlsoSftp = selectedProtocol === "ssh" && watchedProtocols.includes("sftp");
   const hasSftp = hasFileProtocol(watchedProtocols);
+
+  const hostRegister = register("host", { required: true });
+
+  function handleHostChange(e: React.ChangeEvent<HTMLInputElement>) {
+    const parsed = tryParseHostUrl(e.target.value);
+    if (parsed) {
+      setValue("host", parsed.host, { shouldDirty: true, shouldTouch: true });
+      setValue("port", parsed.port, { shouldDirty: true, shouldTouch: true });
+      if (parsed.username) {
+        setValue("username", parsed.username, { shouldDirty: true, shouldTouch: true });
+      }
+      setValue("remote_path", parsed.remotePath, { shouldDirty: true, shouldTouch: true });
+      const newProtocols = buildProtocolList(
+        parsed.protocol,
+        parsed.protocol === "ssh" && watchedProtocols.includes("sftp"),
+      );
+      setValue("protocols", newProtocols, { shouldDirty: true, shouldTouch: true });
+      return;
+    }
+    void hostRegister.onChange(e);
+  }
 
   const steps = useMemo(
     () => [t.hostDrawer.steps.protocol, t.hostDrawer.steps.connection, t.hostDrawer.steps.auth],
@@ -482,7 +549,11 @@ export function HostFormDrawer() {
                 <div className="grid grid-cols-[1fr_110px] gap-2">
                   <div>
                     <label className="text-xs text-muted-foreground mb-1.5 block">{t.hostDrawer.host.label}</label>
-                    <Input placeholder={t.hostDrawer.host.placeholder} {...register("host", { required: true })} />
+                    <Input
+                      placeholder={t.hostDrawer.host.placeholder}
+                      {...hostRegister}
+                      onChange={handleHostChange}
+                    />
                   </div>
                   <div>
                     <label className="text-xs text-muted-foreground mb-1.5 block">{t.hostDrawer.port.label}</label>

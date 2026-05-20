@@ -84,7 +84,7 @@ function formatSettingValue(value: unknown): string {
   return String(value);
 }
 
-type DeepLinkProtocol = "ssh" | "sftp" | "rdp";
+type DeepLinkProtocol = "ssh" | "sftp" | "rdp" | "smb";
 
 interface ParsedConnectionDeepLink {
   protocol: DeepLinkProtocol;
@@ -105,7 +105,7 @@ function normalizeDeepLinkInput(raw: string): string {
 
 function parseDirectConnectionUrl(url: URL): ParsedConnectionDeepLink | null {
   const protocol = url.protocol.replace(":", "").toLowerCase();
-  if (protocol !== "ssh" && protocol !== "sftp" && protocol !== "rdp") {
+  if (protocol !== "ssh" && protocol !== "sftp" && protocol !== "rdp" && protocol !== "smb") {
     return null;
   }
 
@@ -114,14 +114,15 @@ function parseDirectConnectionUrl(url: URL): ParsedConnectionDeepLink | null {
     return null;
   }
 
-  const parsedPort = url.port ? Number(url.port) : protocol === "rdp" ? 3389 : 22;
+  const defaultPort = protocol === "rdp" ? 3389 : protocol === "smb" ? 445 : 22;
+  const parsedPort = url.port ? Number(url.port) : defaultPort;
   if (!Number.isFinite(parsedPort) || parsedPort < 1 || parsedPort > 65535) {
     return null;
   }
 
   const username = decodeURIComponent(url.username || "").trim();
   const pathname = decodeURIComponent(url.pathname || "/").trim();
-  const remotePath = protocol === "sftp" ? (pathname.length ? pathname : "/") : "/";
+  const remotePath = protocol === "sftp" || protocol === "smb" ? (pathname.length ? pathname : "/") : "/";
 
   return {
     protocol,
@@ -165,7 +166,7 @@ function parseConnectionDeepLink(raw: string): ParsedConnectionDeepLink | null {
   }
 
   const hostBasedProtocol = parsed.hostname.toLowerCase();
-  if (hostBasedProtocol === "ssh" || hostBasedProtocol === "sftp" || hostBasedProtocol === "rdp") {
+  if (hostBasedProtocol === "ssh" || hostBasedProtocol === "sftp" || hostBasedProtocol === "rdp" || hostBasedProtocol === "smb") {
     const rebuilt = `${hostBasedProtocol}://${parsed.pathname.replace(/^\/+/, "")}${parsed.search}`;
     return parseConnectionDeepLink(rebuilt);
   }
@@ -449,7 +450,15 @@ function App() {
         ? (["ssh"] as const)
         : parsed.protocol === "sftp"
           ? (["sftp"] as const)
-          : (["rdp"] as const);
+          : parsed.protocol === "smb"
+            ? (["smb"] as const)
+            : (["rdp"] as const);
+    const profileKind =
+      parsed.protocol === "ssh"
+        ? ("host" as const)
+        : parsed.protocol === "rdp"
+          ? ("rdp" as const)
+          : ("sftp" as const);
     const fallbackName = `${parsed.protocol.toUpperCase()} ${parsed.host}`;
 
     if (!parsed.username) {
@@ -465,7 +474,7 @@ function App() {
           keychain_id: null,
           remote_path: parsed.remotePath,
           protocols: [...protocolList],
-          kind: parsed.protocol === "ssh" ? "host" : parsed.protocol === "sftp" ? "sftp" : "rdp",
+          kind: profileKind,
         },
         parsed.protocol,
       );
@@ -500,7 +509,7 @@ function App() {
         keychain_id: null,
         remote_path: parsed.remotePath,
         protocols: [...protocolList],
-        kind: parsed.protocol === "ssh" ? "host" : parsed.protocol === "sftp" ? "sftp" : "rdp",
+        kind: profileKind,
       });
       profile = created;
       useAppStore.setState((current) => ({
@@ -512,7 +521,7 @@ function App() {
 
     if (parsed.protocol === "ssh") {
       await openSsh(profile);
-    } else if (parsed.protocol === "sftp") {
+    } else if (parsed.protocol === "sftp" || parsed.protocol === "smb") {
       await openSftpWorkspace(profile);
     } else {
       await openRdp(profile);
